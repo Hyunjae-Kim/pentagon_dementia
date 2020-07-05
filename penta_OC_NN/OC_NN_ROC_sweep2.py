@@ -19,20 +19,24 @@ args = parser.parse_args()
 hidden_size_list = [32, 64, 128, 512]
 hidden_size = hidden_size_list[args.n_hidden]
 # nu = 0.05*args.nu_factor + 0.05   ##0.05 ~ 1
-nu = 0.005*args.nu_factor + 0.955
+nu = 0.99
 print('Model - nu : %.3f / hidden size : %d'%(nu, hidden_size))
 
-def cal_AUC(sensitivity, specificity):
-    wid = (1-specificity)[:-1]-(1-specificity)[1:]
-    auc = np.sum(sensitivity[1:]*wid)
-    return auc
-
-def get_fpr_tpr(normal_pred, abnormal_pred, r):
+def get_fpr_tpr(normal_pred, abnormal_pred, div_num=40):
+    r_max = np.max(np.vstack((normal_pred, abnormal_pred)))
+    r_min = np.min(np.vstack((normal_pred, abnormal_pred)))
     label = np.append(np.ones(len(normal_pred)), np.zeros(len(abnormal_pred)))
-    y_hat = np.append(np.float32(normal_pred>r), np.float32(abnormal_pred>r))
     
-    fpr, tpr, threshold = roc_curve(label, y_hat, drop_intermediate=False)
-    return fpr, tpr
+    fpr_list = []
+    tpr_list = []
+    for d in range(div_num):
+        r = r_min + d*((r_max-r_min)/div_num)
+        y_hat = np.append(np.float32(normal_pred>r), np.float32(abnormal_pred>r))
+        fpr, tpr, threshold = roc_curve(label, y_hat, drop_intermediate=False)
+        fpr_list.append(fpr[1])
+        tpr_list.append(tpr[1])
+    dauc = auc(fpr_list, tpr_list)
+    return dauc, fpr_list, tpr_list
 
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
@@ -100,7 +104,7 @@ mb_div = 1
 mb_idx = int(len(train_x)/mb_div)
 s = np.arange(len(train_x))
 
-fpr_tpr_list = []
+buff_auc = 0
 for i in range(1001):
     np.random.shuffle(s)
     train_x = train_x[s]
@@ -118,7 +122,7 @@ for i in range(1001):
         output = output.cpu().detach().numpy()
         r = np.quantile(output, nu)
         
-    if i %10==0 and i!=0:
+    if i %100==0 and i!=0:
         model.eval()
         output, _ = model(train_x, r=r, nu=nu)
         output_nm, _ = model(test_nm, r=r, nu=nu)
@@ -128,12 +132,12 @@ for i in range(1001):
         output_nm = output_nm.cpu().detach().numpy()
         output_ab = output_ab.cpu().detach().numpy()
         
-        fpr, tpr = get_fpr_tpr(output_nm, output_ab, r)
-        fpr_tpr_list.append([fpr[1],tpr[1]])
+        dauc, fpr_list, tpr_list = get_fpr_tpr(output_nm, output_ab)
+        if buff_auc < dauc: 
+            buff_auc = dauc
+            np.save('roc_npy2/nu%.3f_hid%d_fpr.npy'%(nu, hidden_size), fpr_list)
+            np.save('roc_npy2/nu%.3f_hid%d_tpr.npy'%(nu, hidden_size), tpr_list)
+            np.save('roc_npy2/nu%.3f_hid%d_outout_nm.npy'%(nu, hidden_size), output_nm)
+            np.save('roc_npy2/nu%.3f_hid%d_output_ab.npy'%(nu, hidden_size), output_ab)
+        print('[%d/1000] - AUC : %.4f'%(i,buff_auc))
         
-        print('[%d/1000] - fpr : %.4f / tpr : %.4f'%(i, fpr[1], tpr[1]))
-        if i==90:
-            np.save('roc_npy/nu%.3f_hid%d_iter%d_output_nm.npy'%(nu, hidden_size, i), output_nm)
-            np.save('roc_npy/nu%.3f_hid%d_iter%d_output_ab.npy'%(nu, hidden_size, i), output_ab)
-        
-# np.save('roc_npy/nu%.3f_hid%d.npy'%(nu, hidden_size), fpr_tpr_list)
